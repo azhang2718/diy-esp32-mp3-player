@@ -1,0 +1,23 @@
+# Song Duration Configuration
+# Format: One line per track
+# Format: track_number,duration_seconds
+#
+# Copy this file to your SD card as "songconfig.txt" (without .example extension)
+# Then edit it with actual durations of your MP3 files
+#
+# To find MP3 duration:
+# - Right-click MP3 → Properties → Details (shows bit rate)
+# - For 128 kbps: duration ≈ file_size_MB × 60 seconds
+# - Or use ffprobe: ffprobe -v error -select_streams a:0 -show_entries stream=duration your_song.mp3
+# - Or use online tools: mediainfo.online
+#
+# Example for 128kbps MP3s:
+# - 240 seconds ≈ 3.6 MB file
+# - 180 seconds ≈ 2.7 MB file
+# - 300 seconds ≈ 4.5 MB file
+
+1,240
+2,186
+3,320
+4,255
+5,195

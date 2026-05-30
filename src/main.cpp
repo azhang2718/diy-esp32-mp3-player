@@ -12,6 +12,7 @@
 #include <U8g2lib.h>
 #include <ESP32Encoder.h>
 #include "config.h"
+#include "claudeframes.h"
 
 // =============================================================================
 // Objects
@@ -35,6 +36,18 @@ int  totalTracks   = 0;
 int  volume        = VOL_DEFAULT;
 bool isPlaying     = false;
 bool displayDirty  = true;   // true = OLED needs a redraw
+
+// Animation state
+int  animationFrame = 0;
+uint32_t lastAnimationMs = 0;
+
+// Track timing state (for progress bar)
+uint32_t trackStartMs = 0;
+int currentTrackDuration = 0;  // seconds
+
+// Song duration map (read from SD card or defaults)
+#define MAX_TRACKS 100
+int songDurations[MAX_TRACKS] = {0};  // 0 = unknown/not loaded
 
 // EQ cycling (optional feature, long-press encoder)
 const uint8_t EQ_PRESETS[]  = {
@@ -95,6 +108,37 @@ uint32_t encPressStartMs  = 0;
 bool     encLongPressArmed = false;   // becomes false once the long-press fires
 
 // =============================================================================
+// Utility helpers
+// =============================================================================
+
+// Format seconds to MM:SS string
+void formatTime(int seconds, char* buffer, int buflen) {
+    int minutes = seconds / 60;
+    int secs = seconds % 60;
+    snprintf(buffer, buflen, "%d:%02d", minutes, secs);
+}
+
+// Get file size in bytes from SD card for current track
+// DFPlayer limitation: we estimate via file count; actual file size requires
+// direct SD card access which is complex. For 128kbps MP3, duration ≈ filesize / 16000
+// Fallback: use 180 seconds if we can't determine
+int estimateDurationFromFileSize(int trackNumber) {
+    // For now, estimate based on typical MP3 duration (180s = 3 min default)
+    // TODO: If you have a way to read file size from SD card, implement here
+    // Duration = fileSize / 16000 (for 128kbps MP3)
+    return 180;  // Default estimate
+}
+
+// Get duration for a track (from config or estimate)
+int getTrackDuration(int trackNumber) {
+    if (trackNumber < 1 || trackNumber > MAX_TRACKS) return 180;
+    if (songDurations[trackNumber - 1] > 0) {
+        return songDurations[trackNumber - 1];  // Use loaded duration
+    }
+    return estimateDurationFromFileSize(trackNumber);  // Estimate fallback
+}
+
+// =============================================================================
 // Display helpers
 // =============================================================================
 
@@ -102,19 +146,52 @@ void updateDisplay() {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_ncenB08_tr);
 
-    // Row 1: play/pause indicator + track info
-    char line1[32];
-    snprintf(line1, sizeof(line1), "%s Track %d / %d",
-             isPlaying ? ">" : "||", currentTrack, totalTracks);
-    u8g2.drawStr(0, 14, line1);
+    // --- Row 1: Claude animation + progress bar ---
+    if (isPlaying) {
+        // Draw Claude running character
+        u8g2.drawBitmap(2, 10, 2, 16, CLAUDE_FRAMES[animationFrame]);
+    }
 
-    // Row 2: volume
-    char line2[16];
-    snprintf(line2, sizeof(line2), "Vol %d", volume);
-    u8g2.drawStr(0, 30, line2);
+    // Draw progress bar background
+    u8g2.drawFrame(20, 14, 100, 4);
 
-    // Row 3: EQ preset
-    u8g2.drawStr(0, 46, EQ_NAMES[eqIndex]);
+    // Draw progress bar fill
+    if (currentTrackDuration > 0) {
+        uint32_t elapsedMs = millis() - trackStartMs;
+        int elapsedSecs = elapsedMs / 1000;
+        int progress = (elapsedSecs * 100) / currentTrackDuration;
+        if (progress > 100) progress = 100;
+        if (progress < 0) progress = 0;
+
+        int barWidth = (progress * 98) / 100;  // 98 to fit in 100-wide frame
+        if (barWidth > 0) {
+            u8g2.drawBox(21, 15, barWidth, 2);
+        }
+    }
+
+    // --- Row 2: Track info + time display ---
+    char line2[48];
+    char timeStr[16];
+    if (currentTrackDuration > 0) {
+        uint32_t elapsedMs = millis() - trackStartMs;
+        int elapsedSecs = elapsedMs / 1000;
+        if (elapsedSecs > currentTrackDuration) {
+            elapsedSecs = currentTrackDuration;
+        }
+        formatTime(elapsedSecs, timeStr, sizeof(timeStr));
+        char durationStr[16];
+        formatTime(currentTrackDuration, durationStr, sizeof(durationStr));
+        snprintf(line2, sizeof(line2), "Track %d/%d  %s/%s",
+                 currentTrack, totalTracks, timeStr, durationStr);
+    } else {
+        snprintf(line2, sizeof(line2), "Track %d/%d", currentTrack, totalTracks);
+    }
+    u8g2.drawStr(0, 40, line2);
+
+    // --- Row 3: Volume + EQ ---
+    char line3[32];
+    snprintf(line3, sizeof(line3), "Vol %d  %s", volume, EQ_NAMES[eqIndex]);
+    u8g2.drawStr(0, 54, line3);
 
     u8g2.sendBuffer();
     displayDirty = false;
@@ -154,12 +231,14 @@ void initDFPlayer() {
 // =============================================================================
 
 void playTrack(int track) {
-    // playMp3Folder() addresses /mp3/000n.mp3 by filename — reliable on clones (spec §6)
     player.playMp3Folder(track);
     currentTrack = track;
-    isPlaying    = true;
+    isPlaying = true;
+    trackStartMs = millis();  // Reset timer for this track
+    currentTrackDuration = getTrackDuration(track);
+    animationFrame = 0;  // Reset animation
     displayDirty = true;
-    Serial.printf("Playing track %d / %d\n", currentTrack, totalTracks);
+    Serial.printf("Playing track %d / %d (duration: %d sec)\n", currentTrack, totalTracks, currentTrackDuration);
 }
 
 void nextTrack() {
@@ -170,6 +249,29 @@ void nextTrack() {
 void prevTrack() {
     int prev = (currentTrack - 2 + totalTracks) % totalTracks + 1;   // wrap 1 → last
     playTrack(prev);
+}
+
+// =============================================================================
+// Song duration loading
+// =============================================================================
+
+void loadSongDurations() {
+    // Initialize with defaults (180 seconds each)
+    for (int i = 0; i < MAX_TRACKS; i++) {
+        songDurations[i] = 180;
+    }
+
+    // TODO: If SD card reader is available, load from /songconfig.txt
+    // Format: one track per line, "tracknum,duration_seconds"
+    // Example:
+    // 1,240
+    // 2,186
+    // 3,320
+    //
+    // For now, using 180s default. User can manually populate songDurations[]
+    // by adding estimated durations based on their MP3 bitrates.
+
+    Serial.println("Song durations initialized (using defaults)");
 }
 
 // =============================================================================
@@ -214,6 +316,8 @@ void setup() {
         Serial.println("WARNING: readFileCounts() returned 0. Check SD card.");
         totalTracks = 1;   // prevent division-by-zero in wrap math
     }
+
+    loadSongDurations();
 
     player.volume(VOL_DEFAULT);
     player.EQ(EQ_PRESETS[eqIndex]);
@@ -335,7 +439,19 @@ void loop() {
     // lastBusy = busyNow;
 
     // -------------------------------------------------------------------------
-    // 5. Redraw OLED only when something changed
+    // 5. Animation frame cycling (while playing)
+    // -------------------------------------------------------------------------
+    if (isPlaying) {
+        uint32_t now = millis();
+        if (now - lastAnimationMs >= ANIMATION_SPEED_MS) {
+            lastAnimationMs = now;
+            animationFrame = (animationFrame + 1) % CLAUDE_FRAME_COUNT;
+            displayDirty = true;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. Redraw OLED only when something changed
     // -------------------------------------------------------------------------
     if (displayDirty) {
         updateDisplay();
