@@ -170,4 +170,3 @@ Use this for whatever you want LMAO
 - [Madhias / madhephaestus](https://github.com/madhephaestus) for the ESP32Encoder library
 - [Espressif](https://www.espressif.com/) for the ESP32 platform and Arduino-ESP32 framework
 
-If you build one of these, I'd love to see it! Good luck!
