@@ -23,7 +23,7 @@ Basically, I lost my Spotify Premium subscription last month (cuz the person who
 ## Bill of materials
 
 | Part | Purpose |
-|---|---|---|
+|---|---|
 | HiLetgo ESP32 dev board (ESP-WROOM-32) | Microcontroller |
 | DFPlayer Mini module | MP3 decoder, SD card slot, DAC |
 | microSD card (4–16 GB) | Music storage |
